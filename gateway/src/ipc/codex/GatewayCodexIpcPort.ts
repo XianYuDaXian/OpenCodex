@@ -50,6 +50,7 @@ const DESKTOP_PROJECT_ROOTS_KEY = "electron-saved-workspace-roots";
 const DESKTOP_WORKSPACE_LABELS_KEY = "electron-workspace-root-labels";
 const DESKTOP_PERSISTED_ATOMS_KEY = "electron-persisted-atom-state";
 const DESKTOP_ARCHIVED_THREADS_KEY = "archivedThreads";
+const BROWSER_USE_ORIGIN_STATE_KEY = "browser-use-origin-state";
 const CONFIGURATION_RAW_DESKTOP_KEYS = new Set([
   "browserAgent",
   "customCliExecutable",
@@ -117,6 +118,7 @@ const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = new Set([
   "global-dictation-enabled-changed",
   "heartbeat-automation-thread-state-changed",
   "heartbeat-automations-enabled-changed",
+  "hotkey-window-home-pointer-interaction-changed",
   "hotkey-window-enabled-changed",
   "keyboard-layout-map-changed",
   "local-thread-activity-changed",
@@ -130,6 +132,18 @@ const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = new Set([
   "tray-menu-threads-changed",
   "view-focused",
 ]);
+const BROWSER_USE_DEFAULT_ORIGIN_STATE = {
+  approvalMode: "alwaysAsk",
+  historyApprovalMode: "alwaysAsk",
+  downloadApprovalMode: "alwaysAsk",
+  uploadApprovalMode: "alwaysAsk",
+  allowedOrigins: [],
+  deniedOrigins: [],
+  allowedDownloadOrigins: [],
+  deniedDownloadOrigins: [],
+  allowedUploadOrigins: [],
+  deniedUploadOrigins: [],
+};
 
 /** 只有 statsig initialize 需要 patch，其他 ChatGPT 后端请求不能误改。 */
 function shouldPatchStatsigInitialize(urlObject) {
@@ -367,6 +381,85 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     return true;
   }
 
+  function normalizeBrowserUseOriginList(value) {
+    const source = Array.isArray(value) ? value : [];
+    const seen = new Set();
+    const list = [];
+    for (const item of source) {
+      if (typeof item !== "string") continue;
+      const normalized = item.trim();
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      list.push(normalized);
+    }
+    return list;
+  }
+
+  function normalizeBrowserUseApprovalMode(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : "alwaysAsk";
+  }
+
+  function normalizeBrowserUseOriginState(value) {
+    const source = value && typeof value === "object" ? value : {};
+    return {
+      approvalMode: normalizeBrowserUseApprovalMode(source.approvalMode),
+      historyApprovalMode: normalizeBrowserUseApprovalMode(source.historyApprovalMode),
+      downloadApprovalMode: normalizeBrowserUseApprovalMode(source.downloadApprovalMode),
+      uploadApprovalMode: normalizeBrowserUseApprovalMode(source.uploadApprovalMode),
+      allowedOrigins: normalizeBrowserUseOriginList(source.allowedOrigins),
+      deniedOrigins: normalizeBrowserUseOriginList(source.deniedOrigins),
+      allowedDownloadOrigins: normalizeBrowserUseOriginList(source.allowedDownloadOrigins),
+      deniedDownloadOrigins: normalizeBrowserUseOriginList(source.deniedDownloadOrigins),
+      allowedUploadOrigins: normalizeBrowserUseOriginList(source.allowedUploadOrigins),
+      deniedUploadOrigins: normalizeBrowserUseOriginList(source.deniedUploadOrigins),
+    };
+  }
+
+  function readBrowserUseOriginState() {
+    return normalizeBrowserUseOriginState(desktopState.getDesktopGlobalStateValue(BROWSER_USE_ORIGIN_STATE_KEY));
+  }
+
+  function writeBrowserUseOriginState(nextState) {
+    const normalized = normalizeBrowserUseOriginState(nextState);
+    desktopState.setDesktopGlobalStateValue(BROWSER_USE_ORIGIN_STATE_KEY, normalized);
+    return normalized;
+  }
+
+  function browserUseOriginKeysForTransferKind(transferKind) {
+    if (transferKind === "download") {
+      return { allowKey: "allowedDownloadOrigins", denyKey: "deniedDownloadOrigins" };
+    }
+    if (transferKind === "upload") {
+      return { allowKey: "allowedUploadOrigins", denyKey: "deniedUploadOrigins" };
+    }
+    return { allowKey: "allowedOrigins", denyKey: "deniedOrigins" };
+  }
+
+  function browserUseOriginKeysForKind(kind, transferKind) {
+    const keys = browserUseOriginKeysForTransferKind(transferKind);
+    return kind === "allow" ? keys.allowKey : keys.denyKey;
+  }
+
+  function addBrowserUseOrigin({ kind, origin, transferKind }) {
+    const targetOrigin = typeof origin === "string" ? origin.trim() : "";
+    if (!targetOrigin) return readBrowserUseOriginState();
+    const state = readBrowserUseOriginState();
+    const targetKey = browserUseOriginKeysForKind(kind, transferKind);
+    const siblingKey = browserUseOriginKeysForKind(kind === "allow" ? "deny" : "allow", transferKind);
+    state[targetKey] = normalizeBrowserUseOriginList([...(state[targetKey] || []), targetOrigin]);
+    state[siblingKey] = normalizeBrowserUseOriginList((state[siblingKey] || []).filter((item) => item !== targetOrigin));
+    return writeBrowserUseOriginState(state);
+  }
+
+  function removeBrowserUseOrigin({ kind, origin, transferKind }) {
+    const targetOrigin = typeof origin === "string" ? origin.trim() : "";
+    if (!targetOrigin) return readBrowserUseOriginState();
+    const state = readBrowserUseOriginState();
+    const targetKey = browserUseOriginKeysForKind(kind, transferKind);
+    state[targetKey] = normalizeBrowserUseOriginList((state[targetKey] || []).filter((item) => item !== targetOrigin));
+    return writeBrowserUseOriginState(state);
+  }
+
   /** Codex 业务 IPC 总分发。未知 channel 必须抛错，不能再静默返回 null。 */
   const handle = async (channel, payload, context = {}) => {
     switch (channel) {
@@ -499,6 +592,63 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       case "automation-run-archive":
         // 创建、修改、删除和归档记录涉及 Desktop 的调度/状态管理，Web 明确报只读错误。
         return automationIpc.throwAutomationReadOnlyError();
+      case "browser-use-origin-state-read":
+        return readBrowserUseOriginState();
+      case "browser-use-approval-mode-write": {
+        const state = readBrowserUseOriginState();
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        state.approvalMode = normalizeBrowserUseApprovalMode(params && params.approvalMode);
+        return writeBrowserUseOriginState(state);
+      }
+      case "browser-use-history-approval-mode-write": {
+        const state = readBrowserUseOriginState();
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        state.historyApprovalMode = normalizeBrowserUseApprovalMode(params && params.approvalMode);
+        return writeBrowserUseOriginState(state);
+      }
+      case "browser-use-file-transfer-approval-mode-write": {
+        const state = readBrowserUseOriginState();
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        const transferKind = params && params.kind === "upload" ? "upload" : "download";
+        if (transferKind === "upload") {
+          state.uploadApprovalMode = normalizeBrowserUseApprovalMode(params && params.approvalMode);
+        } else {
+          state.downloadApprovalMode = normalizeBrowserUseApprovalMode(params && params.approvalMode);
+        }
+        return writeBrowserUseOriginState(state);
+      }
+      case "browser-use-origin-add": {
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        return addBrowserUseOrigin({
+          kind: params && params.kind,
+          origin: params && params.targetOrigin,
+        });
+      }
+      case "browser-use-origin-remove": {
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        return removeBrowserUseOrigin({
+          kind: params && params.kind,
+          origin: params && params.targetOrigin,
+        });
+      }
+      case "browser-use-file-transfer-origin-add": {
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        return addBrowserUseOrigin({
+          kind: params && params.kind,
+          origin: params && params.targetOrigin,
+          transferKind: params && params.transferKind,
+        });
+      }
+      case "browser-use-file-transfer-origin-remove": {
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        return removeBrowserUseOrigin({
+          kind: params && params.kind,
+          origin: params && params.targetOrigin,
+          transferKind: params && params.transferKind,
+        });
+      }
+      case "browser-browsing-data-clear":
+        return true;
       case "active-workspace-roots":
         return { roots: workspaceIpc.activeWorkspaceRootPaths() };
       case "local-environments":
@@ -690,6 +840,37 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return appServerBridge.callAppServer("git/status", payload);
       case "gh-cli-status":
         return gitIpc.ghCliStatus();
+      case "gh-pr-status":
+        return {
+          status: "success",
+          activityItems: [],
+          boardItem: null,
+          body: "",
+          canMerge: false,
+          checks: [],
+          ciStatus: "none",
+          commentAttachments: [],
+          hasOpenPr: false,
+          isDraft: false,
+          number: null,
+          repo: null,
+          reviewers: {
+            approved: [],
+            commentCounts: [],
+            commented: [],
+            changesRequested: [],
+            requested: [],
+            unresolvedCommentCount: 0,
+          },
+          reviewStatus: "none",
+          url: null,
+        };
+      case "terminal-shell-options":
+        return { availableShells: [] };
+      case "external-agent-import-detect":
+        return { items: [], unsupportedProjects: [] };
+      case "external-agent-import-status":
+        return { importedSessionCount: 0, latestImportedAtMs: null };
       case "stable-metadata":
         return gitIpc.gitStableMetadataForPayload(payload || {});
       case "current-branch":

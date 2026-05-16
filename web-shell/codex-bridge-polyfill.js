@@ -452,6 +452,70 @@
 
   installMobileSidebarAutoCollapse();
 
+  const SIDEBAR_FLOATING_LAYER_SWEEP_DELAY_MS = 120;
+  let sidebarFloatingLayerSweepTimer = null;
+  let sidebarFloatingLayerSweepArmed = false;
+
+  function hasSidebarHoverCardClasses(element) {
+    if (!element || !element.classList) return false;
+    return (
+      element.classList.contains("w-fit") &&
+      element.classList.contains("min-w-56") &&
+      element.classList.contains("flex-col") &&
+      element.classList.contains("gap-1") &&
+      element.classList.contains("px-row-x") &&
+      element.classList.contains("py-1.5") &&
+      element.classList.contains("text-token-foreground")
+    );
+  }
+
+  function visibleSidebarHoverCards() {
+    return Array.from(document.querySelectorAll(".w-fit.min-w-56.flex-col.gap-1.px-row-x"))
+      .filter(hasSidebarHoverCardClasses)
+      .filter(visibleElement);
+  }
+
+  function hasSidebarFloatingLayers() {
+    return visibleSidebarHoverCards().length > 0;
+  }
+
+  function dispatchFloatingLayerDismiss() {
+    window.dispatchEvent(new Event("codex:dismiss-tooltips"));
+  }
+
+  /** 侧栏 hover 卡片偶发不收起时，只有从侧栏移出后才清理残留卡片。 */
+  function scheduleSidebarFloatingLayerSweep(event) {
+    if (!document) return;
+    if (event && event.type === "pointermove") {
+      const target = event.target && event.target.nodeType === 1 ? event.target : null;
+      const nav = sidebarNavigationElement();
+      if (target && nav && nav.contains(target)) {
+        sidebarFloatingLayerSweepArmed = true;
+        return;
+      }
+      if (!sidebarFloatingLayerSweepArmed) return;
+    }
+    if (event && event.type !== "pointermove" && event.type !== "scroll" && event.type !== "blur") return;
+    if (!hasSidebarFloatingLayers()) return;
+    if (sidebarFloatingLayerSweepTimer) window.clearTimeout(sidebarFloatingLayerSweepTimer);
+    sidebarFloatingLayerSweepTimer = window.setTimeout(() => {
+      sidebarFloatingLayerSweepTimer = null;
+      if (!hasSidebarFloatingLayers()) return;
+      sidebarFloatingLayerSweepArmed = false;
+      dispatchFloatingLayerDismiss();
+    }, SIDEBAR_FLOATING_LAYER_SWEEP_DELAY_MS);
+  }
+
+  function installSidebarFloatingLayerSweep() {
+    if (!document || document.__codexSidebarFloatingLayerSweepInstalled) return;
+    document.__codexSidebarFloatingLayerSweepInstalled = true;
+    document.addEventListener("pointermove", scheduleSidebarFloatingLayerSweep, true);
+    document.addEventListener("scroll", scheduleSidebarFloatingLayerSweep, true);
+    window.addEventListener("blur", scheduleSidebarFloatingLayerSweep, true);
+  }
+
+  installSidebarFloatingLayerSweep();
+
   /** 模型列表请求参数归一化，保证缓存 key 稳定。 */
   function normalizeModelListParams(params) {
     const input = params && typeof params === "object" && !Array.isArray(params) ? params : {};

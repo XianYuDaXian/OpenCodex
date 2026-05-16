@@ -445,9 +445,10 @@ function patchOfficialAsset(reqPath, data, authToken = "") {
   if (!shouldPatchOfficialAsset(reqPath)) return data;
   const source = data.toString("utf-8");
   const withPatchedImports = patchOfficialJsModuleSpecifiers(source, authToken);
-  const patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
-    ? patchAppServerManagerSignalsChunk(withPatchedImports)
-    : withPatchedImports;
+  let patched = withPatchedImports;
+  if (/\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)) {
+    patched = patchAppServerManagerSignalsChunk(patched);
+  }
   return Buffer.from(patched, "utf-8");
 }
 

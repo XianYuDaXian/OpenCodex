@@ -170,6 +170,7 @@ function parsePositiveNumberEnv(name, fallback) {
 function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath } = {}) {
   const url = process.env.CODEX_APP_SERVER_URL || "";
   const defaultPort = String(process.env.CODEX_APP_SERVER_PORT || 3760);
+  const canSpawnDefaultBinaryDirectly = !!defaultCodexBinaryPath && !process.env.CODEX_APP_SERVER_CMD && !url;
   const defaultCmd = defaultCodexBinaryPath
     ? `${shellQuote(defaultCodexBinaryPath)} app-server --listen stdio://`
     : `codex app-server --listen ws://127.0.0.1:${defaultPort}`;
@@ -803,13 +804,23 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
       }
       if (transport.kind === "stdio") {
         if (!cmd) throw new Error("app-server stdio transport requires CODEX_APP_SERVER_CMD or a default command");
-        logger && logger.info(`[app-server] spawning (${transport.display}): ${cmd}`);
-        child = spawn(cmd, {
-          shell: true,
-          stdio: ["pipe", "pipe", "pipe"],
-          detached: process.platform !== "win32",
-          env: process.env,
-        });
+        if (canSpawnDefaultBinaryDirectly) {
+          logger && logger.info(`[app-server] spawning (${transport.display}): ${defaultCodexBinaryPath} app-server --listen stdio://`);
+          child = spawn(defaultCodexBinaryPath, ["app-server", "--listen", "stdio://"], {
+            shell: false,
+            stdio: ["pipe", "pipe", "pipe"],
+            detached: process.platform !== "win32",
+            env: process.env,
+          });
+        } else {
+          logger && logger.info(`[app-server] spawning (${transport.display}): ${cmd}`);
+          child = spawn(cmd, {
+            shell: true,
+            stdio: ["pipe", "pipe", "pipe"],
+            detached: process.platform !== "win32",
+            env: process.env,
+          });
+        }
         child.on("exit", (code, signal) => {
           logger && logger.info(`[app-server] child exited: code=${code} signal=${signal}`);
           child = null;
